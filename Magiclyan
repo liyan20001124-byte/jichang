@@ -1,0 +1,162 @@
+// ==UserScript==
+// @name         iKuuu机场每日签到
+// @namespace    https://bbs.tampermonkey.net.cn/
+// @version      260422
+// @description  自动签到iKuuu机场领流量，支持多域名切换，适配脚本猫
+// @author       Magic,lan
+// @icon         https://ikuuu.de/favicon.ico
+// @crontab      * 11-23 once * *
+// @connect      ikuuu.nl
+// @connect      ikuuu.fyi
+// @grant        GM_xmlhttpRequest
+// @grant        GM_notification
+// @grant        GM_openInTab
+// @grant        GM_closeNotification
+// @grant        GM_log
+// ==/UserScript==
+
+// 配置：支持的域名列表（按优先级排序）
+const domains = [
+  /*"https://ikuuu.ch/user#", 域名发布源*/
+    "https://ikuuu.win",
+    "https://ikuuu.fyi"
+];
+
+// 当前使用的域名索引
+let currentDomainIndex = 0;
+
+// 获取当前域名的完整URL
+const getCurrentUrl = (path) => `${domains[currentDomainIndex]}${path}`;
+
+// 切换到下一个域名（循环切换）
+const switchNextDomain = () => {
+    currentDomainIndex = (currentDomainIndex + 1) % domains.length;
+    GM_log(`切换到备用域名：${domains[currentDomainIndex]}`);
+};
+
+return new Promise((resolve, reject) => {
+    let errorCount = 0; // 错误重试计数器
+    let timeoutCount = 0; // 超时计数器
+    const MAX_ERROR = 7; // 最大错误次数
+    const MAX_TIMEOUT = 32; // 最大超时计数（32*3秒≈96秒）
+
+    // 检查登录状态
+    const checkLogin = () => {
+        GM_xmlhttpRequest({
+            method: "GET",
+            url: getCurrentUrl("/user"), // 用户中心地址
+            timeout: 10000, // 10秒超时
+            onload: (xhr) => {
+                const finalUrl = xhr.finalUrl;
+                // 判断是否跳转到登录页（包含/auth/login）
+                if (finalUrl.includes("/auth/login")) {
+                    GM_notification({
+                        title: "iKuuu未登录",
+                        text: `请登录 ${domains[currentDomainIndex]} 后重试`,
+                        onclick: (id) => {
+                            GM_openInTab(getCurrentUrl("/auth/login"));
+                            GM_closeNotification(id);
+                        },
+                        timeout: 15000
+                    });
+                    reject(`未登录：${domains[currentDomainIndex]}`);
+                }
+                // 判断是否在用户中心（包含/user）
+                else if (finalUrl.includes("/user")) {
+                    GM_log("已登录，开始执行签到...");
+                    doCheckin(); // 执行签到
+                }
+                // 未知跳转，切换域名重试
+                else {
+                    GM_log(`登录检查失败，URL跳转异常：${finalUrl}`);
+                    switchNextDomain();
+                    retryCheckLogin(); // 重试登录检查
+                }
+            },
+            onerror: () => {
+                GM_log(`登录检查请求失败：${domains[currentDomainIndex]}`);
+                switchNextDomain();
+                retryCheckLogin();
+            },
+            ontimeout: () => {
+                GM_log(`登录检查超时：${domains[currentDomainIndex]}`);
+                switchNextDomain();
+                retryCheckLogin();
+            }
+        });
+    };
+
+    // 重试登录检查
+    const retryCheckLogin = () => {
+        errorCount++;
+        if (errorCount >= MAX_ERROR) {
+            reject("所有域名登录检查均失败，已达最大重试次数");
+            return;
+        }
+        setTimeout(checkLogin, 2000); // 2秒后重试
+    };
+
+    // 执行签到
+    const doCheckin = () => {
+        GM_xmlhttpRequest({
+            method: "POST",
+            url: getCurrentUrl("/user/checkin"), // 签到接口
+            headers: {
+                "Content-Type": "application/x-www-form-urlencoded", // 必要头信息
+                "Accept": "application/json, text/javascript, */*; q=0.01"
+            },
+            responseType: "json",
+            timeout: 10000,
+            onload: (xhr) => {
+                if (xhr.status === 200 && xhr.response) {
+                    const msg = xhr.response.msg || "签到成功";
+                    GM_notification({
+                        title: "iKuuu签到结果",
+                        text: msg,
+                        timeout: 10000
+                    });
+                    resolve(msg);
+                } else {
+                    GM_log(`签到失败，状态码：${xhr.status}`);
+                    retryCheckin(); // 重试签到
+                }
+            },
+            onerror: () => {
+                GM_log(`签到请求错误：${domains[currentDomainIndex]}`);
+                retryCheckin();
+            },
+            ontimeout: () => {
+                GM_log(`签到超时：${domains[currentDomainIndex]}`);
+                retryCheckin();
+            }
+        });
+    };
+
+    // 重试签到
+    const retryCheckin = () => {
+        errorCount++;
+        if (errorCount >= MAX_ERROR) {
+            GM_notification({
+                title: "签到失败",
+                text: "已达最大重试次数，请手动尝试",
+                timeout: 10000
+            });
+            reject("签到失败：已达最大重试次数");
+            return;
+        }
+        switchNextDomain(); // 切换域名重试
+        setTimeout(doCheckin, 3000 + Math.random() * 2000); // 3-5秒随机延迟
+    };
+
+    // 超时监控定时器
+    const timeoutTimer = setInterval(() => {
+        timeoutCount++;
+        if (timeoutCount >= MAX_TIMEOUT) {
+            clearInterval(timeoutTimer);
+            reject("脚本运行超时");
+        }
+    }, 3000); // 每3秒检查一次
+
+    // 启动流程：先检查登录
+    checkLogin();
+});
